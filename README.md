@@ -26,9 +26,4 @@
 
 ---
 
-<details>
-  <summary>:zap: GitHub Stats</summary>
-
-  <img align="left" alt="ArtificialAI Github stats" src="https://github-readme-stats.vercel.app/api?username=artificialai223&show_icons=true&hide_border=true" />
-
-</details>
+<img align="left" alt="ArtificialAI Github stats" src="https://github-readme-stats.vercel.app/api?username=artificialai223&show_icons=true&hide_border=true" />
