@@ -1,6 +1,4 @@
-### Hi there, I'm Henry - aka [ArtificialAI][website] 👋 
-
-[![Website](https://img.shields.io/website?label=enry-walter.comstyle=for-the-badge&url=https%3A%2F%2Fenry-walter.com)](https://henry-walter.com)
+### Hi there, I'm Henry - aka [ArtificialAI] 👋 
 
 ## I'm a Student and Developer!
 
