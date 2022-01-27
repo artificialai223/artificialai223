@@ -1,4 +1,4 @@
-### Hi there, I'm Henry - aka [ArtificialAI] 👋 
+### Hi there, I'm Henry - aka ArtificialAI 👋 
 
 ## I'm a Student and Developer!
 
