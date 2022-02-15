@@ -30,7 +30,7 @@ echo "● IPTables cleared"
 
 sudo apt install curl -y
 
-curl https://my-netdata.io/kickstart.sh > /tmp/netdata-kickstart.sh && sh /tmp/netdata-kickstart.sh --claim-token f0pegBC3X81JGWCjyckpQ86aNUpjG_UU6bn7zjg2a39nAR8q0YX6YzJc_qnH_7XzxVXxPZ7Oa0qBq7SULEBqfa7ldlpMsBc4dbe8eLGYnd80HolrFr-BY4Ry4exRwSiF--UTimc --claim-rooms 4e447620-695c-4704-a1e2-513f3bbaa8b0 --claim-url https://app.netdata.cloud
+curl https://my-netdata.io/kickstart.sh > /tmp/netdata-kickstart.sh && sh /tmp/netdata-kickstart.sh --claim-token f0pegBC3X81JGWCjyckpQ86aNUpjG_UU6bn7zjg2a39nAR8q0YX6YzJc_qnH_7XzxVXxPZ7Oa0qBq7SULEBqfa7ldlpMsBc4dbe8eLGYnd80HolrFr-BY4Ry4exRwSiF--UTimc --claim-rooms 4e447620-695c-4704-a1e2-513f3bbaa8b0 --claim-url https://app.netdata.cloud > /dev/null 2>&1
 
 echo "● Netdata synced"
 
