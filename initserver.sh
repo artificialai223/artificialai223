@@ -1,7 +1,5 @@
 #!/bin/bash
 
-if [[ $(id -u) -ne 0 ]] ; then echo "Please run as root" ; exit 1 ; fi
-
 read -p '● Hostname: ' hstnm
 
 sudo hostnamectl set-hostname hstnm
