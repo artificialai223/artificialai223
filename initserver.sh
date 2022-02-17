@@ -14,16 +14,17 @@ grep -q "swapfile" /etc/fstab
 
 # if not then create it
 if [ $? -ne 0 ]; then
-	echo '● Swapfile not found. Adding swapfile.'
+    clear
+	echo '● Swapfile not found, Adding swapfile.'
 	fallocate -l ${swapsize}M /swapfile
 	chmod 600 /swapfile
 	mkswap /swapfile
 	swapon /swapfile
 	echo '/swapfile none swap defaults 0 0' >> /etc/fstab
 else
-	echo '● Swapfile found. No changes made.'
+    clear
+	echo '● Swapfile found, No changes made.'
 fi
-clear
 echo "● Swap space installed"
 read -p "● Install portainer agent? (y/n) " answer
 clear
