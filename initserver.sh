@@ -7,7 +7,7 @@ sudo hostnamectl set-hostname hstnm
 read -p "● Install portainer agent? (y/n) " answer
 case ${answer:0:1} in
     y|Y )
-        curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+        curl -sSL https://get.docker.com/ > /dev/null 2>&1 | CHANNEL=stable bash > /dev/null 2>&1
         
         docker run -d -p 9001:9001 --name portainer_agent --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/docker/volumes:/var/lib/docker/volumes portainer/agent:2.11.1 > /dev/null 2>&1
         echo "● Portainer agent installed."
@@ -25,12 +25,4 @@ sudo iptables -F
 iptables --flush
 
 echo "● IPTables cleared"
-
-# Sync netdata
-
-sudo apt install curl -y
-
-sudo curl https://my-netdata.io/kickstart.sh > /tmp/netdata-kickstart.sh && sudo sh /tmp/netdata-kickstart.sh --non-interactive --claim-token f0pegBC3X81JGWCjyckpQ86aNUpjG_UU6bn7zjg2a39nAR8q0YX6YzJc_qnH_7XzxVXxPZ7Oa0qBq7SULEBqfa7ldlpMsBc4dbe8eLGYnd80HolrFr-BY4Ry4exRwSiF--UTimc --claim-rooms 4e447620-695c-4704-a1e2-513f3bbaa8b0 --claim-url https://app.netdata.cloud > /dev/null 2>&1
-
-echo "● Netdata synced"
 
