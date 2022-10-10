@@ -1,10 +1,10 @@
-### Hi there, I'm Henry - aka ArtificialAI 👋 
+### Hi there, I'm Henry - aka ArtificialAI or SleekProgrammer 👋 
 
 ## I'm a Student and Developer!
 
 - 🌱 I’m currently learning everything 🤣
-- 👯 I’m looking to collaborate with other content creators
-- 🥅 2022 Goals: Contribute more to Open Source projects
+- 👯 Working with the assistants center team to add awesome features to DBD-Soft-UI!
+- 🥅 2023 Goals: Add 20 features to DBD-Soft-UI
 - ⚡ Fun fact: I love to draw in my free time :P
 
 <br />
