@@ -3,8 +3,6 @@
 ## I'm a Student and Developer!
 
 - 🌱 I’m currently learning everything 🤣
-- 👯 Working with the assistants center team to add awesome features to DBD-Soft-UI!
-- 🥅 2023 Goals: Add 20 features to DBD-Soft-UI
 - ⚡ Fun fact: I love to program random things such as a scrabble solver
 
 <br />
