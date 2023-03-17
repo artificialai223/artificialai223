@@ -52,6 +52,8 @@ sudo iptables -F
 
 iptables --flush
 
+sudo /sbin/iptables-save > /etc/iptables/rules.v4
+
 clear
 
 echo "● IPTables records cleared"
