@@ -3,7 +3,7 @@
 ### A developer from England 
 - 🔭 I'm a student in **England**.
 - 🌱 I'm currently learning **Software Programming**.
-- 📫 Contact: ArtificialAI#0001.
+- 📫 Contact: "artificialai" on Discord.
 - ⚡ What you do has far greater impact than what you say.
 
 ### Languages and Tools
