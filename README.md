@@ -2,7 +2,7 @@
 
 ### A developer from England 
 - 🔭 I'm a student in **England**.
-- 🌱 I'm currently learning **Software Programming**.
+- 🌱 I'm currently pursuing a T Level in Digital Support Services at Newbury College.
 - 📫 Contact: "artificialai" on Discord.
 - ⚡ What you do has far greater impact than what you say.
 
