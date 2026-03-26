@@ -38,9 +38,9 @@ I'm a passionate young developer exploring and building across multiple areas of
 
 If you want to add my SSH key to your server, run:
 
-\`\`\`bash
+```bash
 curl -fsSL https://raw.githubusercontent.com/artificialai223/artificialai223/refs/heads/master/sshkeyinstall.sh | sudo bash
-\`\`\`
+```
 
 ---
 
