@@ -8,7 +8,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly SCRIPT_GIT_COMMIT="${BOOTSTRAP_GIT_COMMIT:-unpublished}"
 readonly ADMIN_USER="administrator"
 readonly ADMIN_PUBLIC_KEY_URL="https://raw.githubusercontent.com/artificialai223/artificialai223/refs/heads/master/mainkey.pubkey"
@@ -280,6 +280,10 @@ cat > /etc/sysctl.d/99-k3s-node-hardening.conf <<'EOF_SYSCTL'
 # Required/expected for Kubernetes networking.
 net.ipv4.ip_forward = 1
 
+# QUIC/cloudflared: allow quic-go to raise UDP socket buffers for reliable high-throughput QUIC.
+net.core.rmem_max = 7500000
+net.core.wmem_max = 7500000
+
 # Network hardening that is compatible with a multi-interface Kubernetes host.
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
@@ -407,6 +411,9 @@ ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw default deny routed
+# Cloudflare Tunnel uses outbound UDP/7844 for QUIC and TCP/7844 for HTTP/2 fallback.
+ufw allow out 7844/udp comment 'Cloudflare Tunnel QUIC'
+ufw allow out 7844/tcp comment 'Cloudflare Tunnel HTTP2 fallback'
 ufw allow in on tailscale0 comment 'Trusted Tailscale underlay'
 ufw allow "${TS_UDP_PORT}/udp" comment 'Tailscale direct WireGuard transport'
 ufw allow from "$POD_CIDR" to any comment 'K3s pod CIDR'
