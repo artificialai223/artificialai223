@@ -11,7 +11,7 @@ umask 027
 readonly SCRIPT_VERSION="1.2.2"
 readonly SCRIPT_GIT_COMMIT="${BOOTSTRAP_GIT_COMMIT:-unpublished}"
 readonly SSHID_URL="https://sshid.io/artificialai"
-readonly SSHID_SYNC_INTERVAL="6h"
+readonly SSHID_SYNC_INTERVAL="30m"
 readonly POD_CIDR="10.42.0.0/16"
 readonly SERVICE_CIDR="10.43.0.0/16"
 readonly TS_UDP_PORT="41641"
