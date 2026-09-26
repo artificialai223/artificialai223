@@ -8,10 +8,10 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.3.0"
 readonly SCRIPT_GIT_COMMIT="${BOOTSTRAP_GIT_COMMIT:-unpublished}"
-readonly SSHID_URL="https://sshid.io/artificialai"
-readonly SSHID_SYNC_INTERVAL="30m"
+readonly ADMIN_USER="administrator"
+readonly ADMIN_PUBLIC_KEY_URL="https://raw.githubusercontent.com/artificialai223/artificialai223/refs/heads/master/mainkey.pubkey"
 readonly POD_CIDR="10.42.0.0/16"
 readonly SERVICE_CIDR="10.43.0.0/16"
 readonly TS_UDP_PORT="41641"
@@ -91,7 +91,7 @@ section "K3s node bootstrap v${SCRIPT_VERSION}"
 echo "Build commit: ${SCRIPT_GIT_COMMIT}"
 echo "This will:"
 echo "  - apply host hardening suitable for a Kubernetes node"
-echo "  - install and automatically refresh your SSHID public keys"
+echo "  - create the administrator account and install the pinned GitHub-hosted SSH public key"
 echo "  - disable password/root SSH"
 echo "  - install and authenticate Tailscale"
 echo "  - make Tailscale the K3s node-to-node underlay"
@@ -114,28 +114,15 @@ while true; do
 done
 NODE_NAME=${NODE_NAME,,}
 
-DEFAULT_ADMIN="${SUDO_USER:-}"
-if [[ -z "$DEFAULT_ADMIN" || "$DEFAULT_ADMIN" == "root" ]]; then
-  if id ubuntu &>/dev/null; then
-    DEFAULT_ADMIN="ubuntu"
-  else
-    DEFAULT_ADMIN="clusteradmin"
-  fi
-fi
-ADMIN_USER=$(prompt_nonempty "Administrative SSH user" "$DEFAULT_ADMIN")
-
-if [[ ! "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-  fail "Invalid Linux username: $ADMIN_USER"
-fi
-[[ "$ADMIN_USER" != "root" ]] || fail "Choose a non-root administrative SSH user; root SSH is disabled by this bootstrap."
-
 if id "$ADMIN_USER" &>/dev/null; then
   info "Using existing user $ADMIN_USER"
 else
   info "Creating locked-password administrator $ADMIN_USER"
   useradd --create-home --shell /bin/bash "$ADMIN_USER"
-  passwd -l "$ADMIN_USER" >/dev/null
 fi
+# This account is deliberately key-only. Lock the password even if the account
+# already existed, then grant administrative sudo access.
+passwd -l "$ADMIN_USER" >/dev/null 2>&1 || true
 usermod -aG sudo "$ADMIN_USER"
 
 cat > "/etc/sudoers.d/90-${ADMIN_USER}-bootstrap-admin" <<EOF_SUDO
@@ -185,193 +172,80 @@ Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
 EOF_UNATTENDED
 systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 
-section "SSH ID public key sync"
+section "Administrator SSH public key"
 ADMIN_HOME=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
 SCRIPT_SHA256=$(sha256sum "$0" | awk '{print $1}')
 [[ "$SCRIPT_GIT_COMMIT" =~ ^[A-Za-z0-9._+-]{1,80}$ ]] || fail "BOOTSTRAP_GIT_COMMIT contains unsupported characters."
 
 # Persist non-secret bootstrap metadata for MOTD/support tooling.
-# BOOTSTRAP_GIT_COMMIT can be exported by an immutable GitHub release/commit
-# wrapper before invoking this script; otherwise the build is marked unpublished.
 cat > /etc/k3s-node-bootstrap.conf <<EOF_BOOTSTRAP_META
 BOOTSTRAP_VERSION='${SCRIPT_VERSION}'
 BOOTSTRAP_GIT_COMMIT='${SCRIPT_GIT_COMMIT}'
 BOOTSTRAP_SCRIPT_SHA256='${SCRIPT_SHA256}'
 BOOTSTRAP_ADMIN_USER='${ADMIN_USER}'
 BOOTSTRAP_ADMIN_HOME='${ADMIN_HOME}'
+BOOTSTRAP_ADMIN_KEY_URL='${ADMIN_PUBLIC_KEY_URL}'
 EOF_BOOTSTRAP_META
 chmod 0644 /etc/k3s-node-bootstrap.conf
+
 install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$ADMIN_HOME/.ssh"
-touch "$ADMIN_HOME/.ssh/authorized_keys"
-chown "$ADMIN_USER:$ADMIN_USER" "$ADMIN_HOME/.ssh/authorized_keys"
-chmod 0600 "$ADMIN_HOME/.ssh/authorized_keys"
 
-# Keep SSHID-managed keys separate from manually installed break-glass keys.
-# OpenSSH is configured below to accept both files. The sync is atomic and
-# keeps the last-known-good SSHID file if the remote service is unavailable or
-# returns invalid/empty content.
-cat > /usr/local/sbin/sync-sshid-keys <<'EOF_SSHID_SYNC'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
+# Remove legacy SSHID automation/artifacts from older revisions if a previous
+# bootstrap attempt created them before failing. This script no longer trusts
+# SSHID as an authentication source.
+systemctl disable --now sshid-key-sync.timer sshid-key-sync.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/sshid-key-sync.timer \
+      /etc/systemd/system/sshid-key-sync.service \
+      /usr/local/sbin/sync-sshid-keys \
+      "$ADMIN_HOME/.ssh/authorized_keys_sshid" \
+      "$ADMIN_HOME/.ssh/.sshid-last-success" \
+      "$ADMIN_HOME/.ssh/.sshid-key-changes.log"
+systemctl daemon-reload
 
-readonly SSHID_URL="https://sshid.io/artificialai"
-readonly SSH_DIR="${HOME}/.ssh"
-readonly TARGET="${SSH_DIR}/authorized_keys_sshid"
-readonly LAST_SUCCESS="${SSH_DIR}/.sshid-last-success"
-readonly CHANGE_LOG="${SSH_DIR}/.sshid-key-changes.log"
-readonly KEY_RE='^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+'
-readonly MAX_CHANGE_LOG_LINES=200
+KEY_RAW=$(mktemp)
+KEY_CLEAN=$(mktemp)
+KEY_TEST=$(mktemp)
 
-install -d -m 0700 "$SSH_DIR"
-RAW=$(mktemp "${SSH_DIR}/.sshid-raw.XXXXXX")
-CLEAN=$(mktemp "${SSH_DIR}/.sshid-clean.XXXXXX")
-OLD_IDS=$(mktemp "${SSH_DIR}/.sshid-old.XXXXXX")
-NEW_IDS=$(mktemp "${SSH_DIR}/.sshid-new.XXXXXX")
-DIFF_IDS=$(mktemp "${SSH_DIR}/.sshid-diff.XXXXXX")
-FP_FILE=$(mktemp "${SSH_DIR}/.sshid-fp.XXXXXX")
-LOG_TMP=$(mktemp "${SSH_DIR}/.sshid-log.XXXXXX")
-trap 'rm -f "$RAW" "$CLEAN" "$OLD_IDS" "$NEW_IDS" "$DIFF_IDS" "$FP_FILE" "$LOG_TMP"' EXIT
-
+info "Downloading administrator public key from $ADMIN_PUBLIC_KEY_URL"
 curl --proto '=https' --tlsv1.2 -fsS \
   --connect-timeout 10 --max-time 30 \
-  "$SSHID_URL" -o "$RAW"
+  "$ADMIN_PUBLIC_KEY_URL" -o "$KEY_RAW"
 
-# Normalize CRLF, ignore blank/comment-only lines, and reject the entire update
-# if any returned key line is not a recognizable OpenSSH public-key format.
-sed -i 's/\r$//' "$RAW"
+sed -i 's/\r$//' "$KEY_RAW"
+# Ignore empty/comment lines, but reject the download if any remaining line is
+# not a normal OpenSSH public key. This prevents HTML/error pages being written
+# into authorized_keys.
 if ! awk '
   /^[[:space:]]*$/ { next }
   /^[[:space:]]*#/ { next }
   $1 ~ /^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)$/ { next }
   { exit 1 }
-' "$RAW"; then
-  echo "SSHID sync refused: response contained an unrecognized line." >&2
-  exit 1
+' "$KEY_RAW"; then
+  fail "Administrator public-key download contained an unrecognized line."
 fi
 
 awk '
   /^[[:space:]]*$/ { next }
   /^[[:space:]]*#/ { next }
   !seen[$0]++ { print }
-' "$RAW" > "$CLEAN"
+' "$KEY_RAW" > "$KEY_CLEAN"
 
-KEY_COUNT=$(grep -Ec "$KEY_RE" "$CLEAN" || true)
-if [[ "$KEY_COUNT" -lt 1 ]]; then
-  echo "SSHID sync refused: no valid SSH public keys were returned." >&2
-  exit 1
-fi
+KEY_COUNT=$(grep -Ec '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+' "$KEY_CLEAN" || true)
+[[ "$KEY_COUNT" -ge 1 ]] || fail "No valid OpenSSH public key was returned by $ADMIN_PUBLIC_KEY_URL"
 
-# Compare key identity (algorithm + key blob), intentionally ignoring comments.
-if [[ -s "$TARGET" ]]; then
-  awk 'NF >= 2 { print $1 " " $2 }' "$TARGET" | sort -u > "$OLD_IDS"
-else
-  : > "$OLD_IDS"
-fi
-awk 'NF >= 2 { print $1 " " $2 }' "$CLEAN" | sort -u > "$NEW_IDS"
+# Validate each key with OpenSSH itself before making it authoritative.
+while IFS= read -r keyline; do
+  [[ -n "$keyline" ]] || continue
+  printf '%s\n' "$keyline" > "$KEY_TEST"
+  ssh-keygen -lf "$KEY_TEST" -E sha256 >/dev/null 2>&1 \
+    || fail "A downloaded administrator key failed ssh-keygen validation."
+done < "$KEY_CLEAN"
 
-fingerprint_identity() {
-  local identity=$1 fp keytype
-  printf '%s\n' "$identity" > "$FP_FILE"
-  fp=$(ssh-keygen -lf "$FP_FILE" -E sha256 2>/dev/null | awk '{print $2}' | head -n1 || true)
-  keytype=${identity%% *}
-  printf '%s %s' "${fp:-SHA256:unavailable}" "$keytype"
-}
+install -m 0600 -o "$ADMIN_USER" -g "$ADMIN_USER" "$KEY_CLEAN" "$ADMIN_HOME/.ssh/authorized_keys"
+rm -f "$KEY_RAW" "$KEY_CLEAN" "$KEY_TEST"
 
-log_changes() {
-  local action=$1 source_file=$2 identity details
-  while IFS= read -r identity; do
-    [[ -n "$identity" ]] || continue
-    details=$(fingerprint_identity "$identity")
-    printf '%s %-7s %s\n' "$(date --iso-8601=seconds)" "$action" "$details" >> "$CHANGE_LOG"
-    echo "SSHID key ${action,,}: ${details}"
-  done < "$source_file"
-}
-
-# comm requires sorted inputs; both identity files are sorted above.
-comm -13 "$OLD_IDS" "$NEW_IDS" > "$DIFF_IDS"
-log_changes "ADDED" "$DIFF_IDS"
-comm -23 "$OLD_IDS" "$NEW_IDS" > "$DIFF_IDS"
-log_changes "REMOVED" "$DIFF_IDS"
-
-# Keep a useful local audit trail without allowing this tiny state file to grow
-# forever. The MOTD displays only the most recent 10 entries.
-if [[ -f "$CHANGE_LOG" ]]; then
-  tail -n "$MAX_CHANGE_LOG_LINES" "$CHANGE_LOG" > "$LOG_TMP"
-  mv -f "$LOG_TMP" "$CHANGE_LOG"
-  chmod 0600 "$CHANGE_LOG"
-fi
-
-chmod 0600 "$CLEAN"
-# Same-directory rename makes the replacement atomic: sshd sees either the old
-# complete file or the new complete file, never a partially downloaded file.
-mv -f "$CLEAN" "$TARGET"
-printf '%s\n' "$(date --iso-8601=seconds)" > "$LAST_SUCCESS"
-chmod 0600 "$TARGET" "$LAST_SUCCESS"
-echo "SSHID sync successful: installed ${KEY_COUNT} key(s) from ${SSHID_URL}."
-EOF_SSHID_SYNC
-chmod 0755 /usr/local/sbin/sync-sshid-keys
-
-cat > /etc/systemd/system/sshid-key-sync.service <<EOF_SSHID_SERVICE
-[Unit]
-Description=Refresh SSH public keys from SSHID
-Documentation=https://sshid.io/artificialai
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-User=${ADMIN_USER}
-Group=${ADMIN_USER}
-Environment=HOME=${ADMIN_HOME}
-ExecStart=/usr/local/sbin/sync-sshid-keys
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=${ADMIN_HOME}/.ssh
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
-AmbientCapabilities=
-UMask=0077
-EOF_SSHID_SERVICE
-
-cat > /etc/systemd/system/sshid-key-sync.timer <<EOF_SSHID_TIMER
-[Unit]
-Description=Periodically refresh SSHID public keys
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=${SSHID_SYNC_INTERVAL}
-RandomizedDelaySec=10min
-Persistent=true
-Unit=sshid-key-sync.service
-
-[Install]
-WantedBy=timers.target
-EOF_SSHID_TIMER
-
-systemctl daemon-reload
-# Populate the key file before password/root SSH is disabled. If this first
-# fetch fails, abort now so the machine cannot be accidentally locked out.
-systemctl start sshid-key-sync.service
-systemctl enable --now sshid-key-sync.timer
-
-SSHID_KEY_FILE="$ADMIN_HOME/.ssh/authorized_keys_sshid"
-[[ -s "$SSHID_KEY_FILE" ]] || fail "SSHID key sync completed without creating $SSHID_KEY_FILE"
-KEY_COUNT=$(grep -Ec '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+' "$SSHID_KEY_FILE" || true)
-info "Installed $KEY_COUNT SSHID public key(s) for $ADMIN_USER from $SSHID_URL"
-info "SSHID keys will refresh every $SSHID_SYNC_INTERVAL; failed refreshes keep the last-known-good keys."
+info "Installed $KEY_COUNT administrator public key(s) into $ADMIN_HOME/.ssh/authorized_keys"
+info "Key source: $ADMIN_PUBLIC_KEY_URL"
 
 section "SSH hardening"
 cat > /etc/ssh/sshd_config.d/99-k3s-node-hardening.conf <<EOF_SSH
@@ -379,7 +253,7 @@ cat > /etc/ssh/sshd_config.d/99-k3s-node-hardening.conf <<EOF_SSH
 Protocol 2
 PermitRootLogin no
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys_sshid
+AuthorizedKeysFile .ssh/authorized_keys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -726,10 +600,6 @@ MEM=$(free -h | awk '/^Mem:/{print $3 " / " $2}')
 ROOTDISK=$(df -h / | awk 'NR==2{print $3 " / " $2 " (" $5 ")"}')
 LOAD=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
 UFW=$(ufw status 2>/dev/null | awk 'NR==1{$1=""; sub(/^ /,""); print}')
-SSHIDSYNC=$(systemctl is-active sshid-key-sync.timer 2>/dev/null)
-ADMIN_HOME=${BOOTSTRAP_ADMIN_HOME:-/home/${BOOTSTRAP_ADMIN_USER:-}}
-SSHIDLAST=$(cat "${ADMIN_HOME}/.ssh/.sshid-last-success" 2>/dev/null || true)
-SSHIDCHANGELOG="${ADMIN_HOME}/.ssh/.sshid-key-changes.log"
 
 printf '\n'
 printf '=======================================================================\n'
@@ -749,7 +619,6 @@ printf '  Memory          : %s\n' "${MEM:-unknown}"
 printf '  Root disk       : %s\n' "${ROOTDISK:-unknown}"
 printf '  Load            : %s\n' "$LOAD"
 printf '  Firewall        : %s\n' "${UFW:-unknown}"
-printf '  SSHID sync      : %s%s\n' "${SSHIDSYNC:-unknown}" "${SSHIDLAST:+ (last: $SSHIDLAST)}"
 printf '-----------------------------------------------------------------------\n'
 printf '  Public inbound  : denied (except UDP/41641 for Tailscale)\n'
 printf '  Administration  : Tailscale + SSH public key\n'
@@ -758,12 +627,8 @@ if [[ "$K3SSVC" == "k3s" ]]; then
   [[ -n "$NODES" ]] && printf '  Cluster          : %s\n' "$NODES"
 fi
 printf '-----------------------------------------------------------------------\n'
-printf '  SSHID key changes (latest 10)\n'
-if [[ -s "$SSHIDCHANGELOG" ]]; then
-  tail -n 10 "$SSHIDCHANGELOG" 2>/dev/null | sed 's/^/    /'
-else
-  printf '    No key changes recorded.\n'
-fi
+printf '  SSH user         : %s (public-key only)\n' "${BOOTSTRAP_ADMIN_USER:-administrator}"
+printf '  SSH key source   : GitHub mainkey.pubkey\n'
 printf '=======================================================================\n\n'
 EOF_MOTD
 chmod 0755 /etc/update-motd.d/00-k3s-node
@@ -801,7 +666,7 @@ printf '  K3s service     : %s\n' "$K3S_SERVICE"
 printf '  Public SSH      : BLOCKED by UFW\n'
 printf '  Tailscale SSH   : ssh %s@%s\n' "$ADMIN_USER" "$TS_IP"
 printf '  Longhorn prereq : open-iscsi installed and iscsid enabled\n'
-printf '  SSHID key sync  : every %s via systemd timer\n' "$SSHID_SYNC_INTERVAL"
+printf '  SSH key         : %s\n' "$ADMIN_PUBLIC_KEY_URL"
 
 if [[ "$ROLE_CHOICE" == "1" ]]; then
   printf '\nJoin additional SERVER nodes with the token from:\n'
