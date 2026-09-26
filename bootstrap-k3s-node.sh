@@ -8,7 +8,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly SCRIPT_GIT_COMMIT="${BOOTSTRAP_GIT_COMMIT:-unpublished}"
 readonly SSHID_URL="https://sshid.io/artificialai"
 readonly SSHID_SYNC_INTERVAL="6h"
@@ -470,12 +470,29 @@ section "Tailscale"
 CODENAME="${VERSION_CODENAME:-}"
 [[ -n "$CODENAME" ]] || fail "Unable to determine Ubuntu codename."
 install -d -m 0755 /usr/share/keyrings
+# The bootstrap uses umask 027 globally. APT drops privileges to the _apt user
+# while verifying repositories, so repository keyrings and source-list files
+# must be world-readable. Download to temporary files, validate they are
+# non-empty, then install explicitly with mode 0644.
+TS_KEY_TMP=$(mktemp)
+TS_LIST_TMP=$(mktemp)
+trap 'rm -f "${TS_KEY_TMP:-}" "${TS_LIST_TMP:-}"' RETURN
+
 curl --proto '=https' --tlsv1.2 -fsSL \
   "https://pkgs.tailscale.com/stable/ubuntu/${CODENAME}.noarmor.gpg" \
-  -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+  -o "$TS_KEY_TMP"
 curl --proto '=https' --tlsv1.2 -fsSL \
   "https://pkgs.tailscale.com/stable/ubuntu/${CODENAME}.tailscale-keyring.list" \
-  -o /etc/apt/sources.list.d/tailscale.list
+  -o "$TS_LIST_TMP"
+
+[[ -s "$TS_KEY_TMP" ]] || fail "Downloaded Tailscale APT keyring is empty."
+[[ -s "$TS_LIST_TMP" ]] || fail "Downloaded Tailscale APT source list is empty."
+
+install -o root -g root -m 0644 "$TS_KEY_TMP" /usr/share/keyrings/tailscale-archive-keyring.gpg
+install -o root -g root -m 0644 "$TS_LIST_TMP" /etc/apt/sources.list.d/tailscale.list
+rm -f "$TS_KEY_TMP" "$TS_LIST_TMP"
+trap - RETURN
+
 apt-get update
 apt-get install -y tailscale
 systemctl enable --now tailscaled
