@@ -243,6 +243,7 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 PermitEmptyPasswords no
 X11Forwarding no
+PrintMotd no
 AuthenticationMethods publickey
 MaxAuthTries 3
 LoginGraceTime 30
@@ -348,6 +349,80 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now haven-firewall.service
 nft list table inet haven_private >/dev/null
+
+log 'Replacing distribution MOTD with a compact status display'
+motd_backup="/var/backups/haven-motd-$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 0700 "$motd_backup" "$motd_backup/update-motd.d"
+if [[ -e /etc/motd || -L /etc/motd ]]; then mv /etc/motd "$motd_backup/motd"; fi
+install -d -m 0755 /etc/update-motd.d /etc/haven-empty-motd.d
+find /etc/update-motd.d -mindepth 1 -maxdepth 1 -print0 | while IFS= read -r -d '' fragment; do
+  mv "$fragment" "$motd_backup/update-motd.d/"
+done
+cat >/etc/update-motd.d/00-haven-status <<'MOTD'
+#!/usr/bin/env bash
+# No remote lookups or secrets. Every optional status probe has a short timeout.
+set -u
+host=$(hostname -s)
+up=$(uptime -p 2>/dev/null || echo unknown)
+load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)
+mem=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if(t) printf "%.1f / %.1f GiB used", (t-a)/1048576, t/1048576; else print "unknown"}' /proc/meminfo)
+disk=$(df -hP / 2>/dev/null | awk 'NR==2 {print $3 " / " $2 " used (" $5 ")"}')
+ts=$(timeout 2 tailscale ip -4 2>/dev/null | head -n1)
+[[ -n $ts ]] || ts='offline'
+docker_status='offline'; swarm='inactive'
+if timeout 3 docker info >/dev/null 2>&1; then
+  docker_status='running'
+  swarm=$(timeout 3 docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo unknown)
+  if [[ $swarm == active ]]; then
+    manager=$(timeout 3 docker info --format '{{.Swarm.ControlAvailable}}' 2>/dev/null || echo false)
+    if [[ $manager == true ]]; then
+      swarm='manager'
+    else
+      swarm='worker'
+    fi
+  fi
+fi
+firewall='inactive'
+timeout 2 nft list table inet haven_private >/dev/null 2>&1 && firewall='active'
+gpu='none detected'
+if command -v nvidia-smi >/dev/null; then
+  gpu=$(timeout 3 nvidia-smi -L 2>/dev/null | head -n1)
+  [[ -n $gpu ]] || gpu='driver not ready'
+fi
+printf '\n%s | %s\n' "$host" "$(. /etc/os-release; printf '%s' "$PRETTY_NAME")"
+printf '  Uptime: %-28s Load: %s\n' "$up" "$load"
+printf '  Memory: %-28s Root disk: %s\n' "$mem" "${disk:-unknown}"
+printf '  Tailscale: %-25s SSH: administrator@%s\n' "$ts" "$ts"
+printf '  Docker: %-28s Swarm: %s\n' "$docker_status" "$swarm"
+printf '  GPU: %s\n' "$gpu"
+printf '  Firewall: %s' "$firewall"
+[[ -f /var/run/reboot-required ]] && printf ' | REBOOT REQUIRED'
+printf '\n'
+if [[ $swarm == manager ]] && timeout 2 docker service inspect dokploy >/dev/null 2>&1; then
+  printf '  Dokploy: http://%s:3000\n' "$ts"
+fi
+printf '\n'
+MOTD
+chmod 0755 /etc/update-motd.d/00-haven-status
+ln -s /run/motd.dynamic /etc/motd
+# Route PAM MOTD for SSH and console through one generated file, suppressing
+# vendor fragment directories without altering package-owned /usr/lib files.
+python3 - <<'PY'
+from pathlib import Path
+import re
+for name in ('sshd', 'login'):
+    p = Path('/etc/pam.d') / name
+    if not p.exists():
+        continue
+    lines = p.read_text().splitlines()
+    lines = [line for line in lines if '# haven-motd' not in line]
+    lines = [('# disabled by haven: ' + line) if re.match(r'^\s*session\s+\S+\s+pam_motd\.so\b', line) else line for line in lines]
+    lines.append('session optional pam_motd.so motd=/run/motd.dynamic motd_dir=/etc/haven-empty-motd.d # haven-motd')
+    p.write_text('\n'.join(lines) + '\n')
+PY
+motd_preview=$(timeout 10 /etc/update-motd.d/00-haven-status)
+[[ $motd_preview == *'Tailscale:'* && $motd_preview == *'Swarm:'* ]] || die 'Custom MOTD preview failed.'
+printf '%s\n' "$motd_preview"
 
 printf '\nDone. SSH: ssh administrator@%s\n' "$ts_ip"
 if [[ $dokploy == yes ]]; then
