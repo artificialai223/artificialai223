@@ -8,7 +8,7 @@ umask 077
 KEY_URL='https://raw.githubusercontent.com/artificialai223/artificialai223/refs/heads/master/mainkey.pubkey'
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-trap 'printf "ERROR at line %s; no later hardening steps were applied.\n" "$LINENO" >&2' ERR
+trap 'printf "ERROR at line %s; inspect the failed step, then rerun to resume.\n" "$LINENO" >&2' ERR
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 [[ -t 0 ]] || die 'Run interactively from a terminal.'
 source /etc/os-release
@@ -25,6 +25,9 @@ if [[ $mode == 1 ]]; then
 fi
 read -r -p 'Server name (DNS label, e.g. swarm-01): ' server_name
 [[ $server_name =~ ^[a-zA-Z][a-zA-Z0-9-]{0,62}$ && $server_name != *- ]] || die 'Invalid server name.'
+if command -v docker >/dev/null && [[ $(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || true) == active ]]; then
+  [[ $server_name == "$(hostname -s)" ]] || die 'This node is already in a Swarm. Re-enter its existing hostname to resume.'
+fi
 if command -v tailscale >/dev/null && tailscale ip -4 >/dev/null 2>&1; then
   printf 'Existing Tailscale connection found; it will be reused.\n'
   ts_key=''
@@ -32,13 +35,6 @@ else
   read -r -s -p 'Tailscale auth key (tskey-auth-...): ' ts_key; printf '\n'
   [[ $ts_key == tskey-auth-* ]] || die 'Expected a Tailscale auth key.'
 fi
-if [[ $mode == 2 ]]; then
-  read -r -p 'Manager Tailscale IPv4 address (100.x.y.z): ' manager_ip
-  [[ $manager_ip =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || die 'Use a manager Tailscale IPv4 address.'
-  read -r -s -p 'Swarm WORKER join token (SWMTKN-...): ' join_token; printf '\n'
-  [[ $join_token == SWMTKN-1-* ]] || die 'Expected a Swarm join token.'
-fi
-
 log 'Installing prerequisites and the administrator SSH key'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -92,9 +88,18 @@ if ! command -v docker >/dev/null; then
 fi
 systemctl enable --now docker
 docker info >/dev/null
-if [[ $(docker info --format '{{.Swarm.LocalNodeState}}') != inactive ]]; then
-  die 'This host already belongs to a Swarm; refusing to overwrite its membership.'
-fi
+swarm_state=$(docker info --format '{{.Swarm.LocalNodeState}}')
+case "$swarm_state" in
+  inactive) : ;;
+  active)
+    swarm_manager=$(docker info --format '{{.Swarm.ControlAvailable}}')
+    if [[ $mode == 1 && $swarm_manager != true ]] || [[ $mode == 2 && $swarm_manager != false ]]; then
+      die 'Existing Swarm role differs from the selected role. Choose the role already on this host.'
+    fi
+    log 'Existing Swarm membership detected; installation will resume without changing it'
+    ;;
+  *) die "Swarm state is $swarm_state; investigate before retrying." ;;
+esac
 
 gpu_ready=no
 if lspci -nn | grep -Eiq 'NVIDIA.*(VGA|3D|Display)|\[(0300|0302|0380)\].*NVIDIA'; then
@@ -137,14 +142,16 @@ EOF
       die 'Driver installed but cannot load yet. Reboot and rerun; the existing Tailscale login can be reused.'
     fi
   fi
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-    >/etc/apt/sources.list.d/nvidia-container-toolkit.list
-  apt-get update
-  apt-get install -y nvidia-container-toolkit
-  nvidia-ctk runtime configure --runtime=docker --set-as-default
-  systemctl restart docker
+  if ! docker info --format '{{json .Runtimes}}' | grep -q nvidia; then
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      >/etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update
+    apt-get install -y nvidia-container-toolkit
+    nvidia-ctk runtime configure --runtime=docker --set-as-default
+    systemctl restart docker
+  fi
   docker info --format '{{json .Runtimes}}' | grep -q nvidia || die 'NVIDIA Docker runtime unavailable.'
   docker run --rm --gpus all --entrypoint nvidia-smi nvidia/cuda:12.9.1-base-ubuntu24.04 -L \
     || die 'NVIDIA container runtime test failed; Swarm has not been created.'
@@ -170,11 +177,20 @@ dockerd --validate --config-file /etc/docker/daemon.json >/dev/null
 systemctl restart docker
 
 log 'Creating or joining the Swarm over Tailscale'
-if [[ $mode == 1 ]]; then
-  docker swarm init --advertise-addr "$ts_ip" --data-path-addr "$ts_ip" --listen-addr "$ts_ip:2377"
+if [[ $swarm_state == inactive ]]; then
+  if [[ $mode == 1 ]]; then
+    docker swarm init --advertise-addr "$ts_ip" --data-path-addr "$ts_ip" --listen-addr "$ts_ip:2377"
+  else
+    read -r -p 'Manager Tailscale IPv4 address (100.x.y.z): ' manager_ip
+    [[ $manager_ip =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || die 'Use a manager Tailscale IPv4 address.'
+    read -r -s -p 'Swarm WORKER join token (SWMTKN-...): ' join_token; printf '\n'
+    [[ $join_token == SWMTKN-1-* ]] || die 'Expected a Swarm join token.'
+    docker swarm join --token "$join_token" --advertise-addr "$ts_ip" --data-path-addr "$ts_ip" --listen-addr "$ts_ip:2377" "$manager_ip:2377"
+    unset join_token
+  fi
 else
-  docker swarm join --token "$join_token" --advertise-addr "$ts_ip" --data-path-addr "$ts_ip" --listen-addr "$ts_ip:2377" "$manager_ip:2377"
-  unset join_token
+  [[ $(docker info --format '{{.Swarm.LocalNodeState}}') == active ]] || die 'Swarm membership became unavailable after Docker restarted.'
+  printf 'Swarm already active; keeping existing node ID, tokens, and workloads.\n'
 fi
 if [[ $gpu_ready == yes ]]; then
   log 'Labelling this node as GPU-capable'
@@ -187,20 +203,33 @@ if [[ $gpu_ready == yes ]]; then
 fi
 
 if [[ $dokploy == yes ]]; then
-  log 'Installing Dokploy using its existing-Swarm procedure'
-  for port in 80 443 3000; do
-    if ss -lnt "( sport = :$port )" | grep -qE 'LISTEN'; then die "Port $port is occupied."; fi
-  done
-  docker network create --driver overlay --attachable dokploy-network
+  log 'Installing or resuming Dokploy using its existing-Swarm procedure'
+  if ! docker service inspect dokploy >/dev/null 2>&1; then
+    if ss -lnt '( sport = :3000 )' | grep -q LISTEN; then die 'Port 3000 is occupied.'; fi
+  fi
+  if ! docker container inspect dokploy-traefik >/dev/null 2>&1; then
+    for port in 80 443; do
+      if ss -lnt "( sport = :$port )" | grep -q LISTEN; then die "Port $port is occupied."; fi
+    done
+  fi
+  docker network inspect dokploy-network >/dev/null 2>&1 || docker network create --driver overlay --attachable dokploy-network
+  [[ $(docker network inspect -f '{{.Driver}}' dokploy-network) == overlay ]] || die 'Existing dokploy-network is not an overlay network.'
   install -d -m 0755 /etc/dokploy
-  openssl rand -hex 32 | docker secret create dokploy_postgres_password -
-  openssl rand -hex 32 | docker secret create dokploy_auth_secret -
-  docker service create --name dokploy-postgres --constraint 'node.role==manager' \
+  if ! docker secret inspect dokploy_postgres_password >/dev/null 2>&1; then
+    openssl rand -hex 32 | docker secret create dokploy_postgres_password -
+  fi
+  if ! docker secret inspect dokploy_auth_secret >/dev/null 2>&1; then
+    openssl rand -hex 32 | docker secret create dokploy_auth_secret -
+  fi
+  if ! docker service inspect dokploy-postgres >/dev/null 2>&1; then
+    docker service create --name dokploy-postgres --constraint 'node.role==manager' \
     --network dokploy-network --env POSTGRES_USER=dokploy --env POSTGRES_DB=dokploy \
     --secret source=dokploy_postgres_password,target=/run/secrets/postgres_password \
     --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
     --mount type=volume,source=dokploy-postgres,target=/var/lib/postgresql/data postgres:16
-  docker service create --name dokploy --replicas 1 --network dokploy-network \
+  fi
+  if ! docker service inspect dokploy >/dev/null 2>&1; then
+    docker service create --name dokploy --replicas 1 --network dokploy-network \
     --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
     --mount type=bind,source=/etc/dokploy,target=/etc/dokploy \
     --mount type=volume,source=dokploy,target=/root/.docker \
@@ -210,17 +239,24 @@ if [[ $dokploy == yes ]]; then
     --update-parallelism 1 --update-order stop-first --constraint 'node.role==manager' \
     --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
     --env BETTER_AUTH_SECRET_FILE=/run/secrets/dokploy_auth_secret dokploy/dokploy:latest
+  fi
   for i in $(seq 1 60); do
     [[ -f /etc/dokploy/traefik/traefik.yml ]] && break
     sleep 2
   done
   [[ -f /etc/dokploy/traefik/traefik.yml ]] || die 'Dokploy did not generate Traefik config; inspect docker service logs dokploy.'
-  docker run -d --name dokploy-traefik --restart always \
+  if ! docker container inspect dokploy-traefik >/dev/null 2>&1; then
+    docker run -d --name dokploy-traefik --restart always \
     -v /etc/dokploy/traefik/traefik.yml:/etc/traefik/traefik.yml \
     -v /etc/dokploy/traefik/dynamic:/etc/dokploy/traefik/dynamic \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
     -p 80:80/tcp -p 443:443/tcp -p 443:443/udp traefik:v3.6.7
-  docker network connect dokploy-network dokploy-traefik
+  elif [[ $(docker inspect -f '{{.State.Running}}' dokploy-traefik) != true ]]; then
+    docker start dokploy-traefik
+  fi
+  if ! docker inspect -f '{{json .NetworkSettings.Networks}}' dokploy-traefik | grep -Fq '"dokploy-network"'; then
+    docker network connect dokploy-network dokploy-traefik
+  fi
 fi
 
 log 'Validating services before restricting inbound traffic'
@@ -328,7 +364,9 @@ table inet haven_private {
   }
 }
 NFT
-nft -c -f /etc/nftables.d-haven.conf
+if ! nft list table inet haven_private >/dev/null 2>&1; then
+  nft -c -f /etc/nftables.d-haven.conf
+fi
 cat >/usr/local/sbin/haven-firewall <<'FW'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -349,7 +387,8 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now haven-firewall.service
+systemctl enable haven-firewall.service
+systemctl restart haven-firewall.service
 nft list table inet haven_private >/dev/null
 
 log 'Replacing distribution MOTD with a compact status display'
