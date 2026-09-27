@@ -157,7 +157,9 @@ import json
 from pathlib import Path
 p = Path('/etc/docker/daemon.json')
 d = json.loads(p.read_text()) if p.exists() else {}
-d['live-restore'] = True
+# Docker rejects live-restore when this host enters Swarm mode. Clear any
+# value left by an earlier run of this installer before initializing/joining.
+d.pop('live-restore', None)
 d['userland-proxy'] = False
 d.setdefault('log-driver', 'json-file')
 if d['log-driver'] == 'json-file':
